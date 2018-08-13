@@ -137,6 +137,30 @@
 #define tshark_debug(...)
 #endif
 
+static char file_name[128];
+static char tagg[1024];
+static char addtag[1024];
+static char indexx[128];
+static char read_str[4096];
+static char format_str[4096];
+static pid_t pid;
+static char tmpfile_path[256];
+static FILE *tmp_file;
+//static char tmp_tmp[1024];
+static int first = 0;
+
+gchar tags[10][128];
+gchar rules[10][128];
+static int rules_num;
+static int tags_num;
+int kkk = 0;
+int ppp = 0;
+
+
+dfilter_t           *dfcode = NULL;
+dfilter_t           *dfcode2 = NULL;
+static dfilter_t           *dfcodes[10];
+
 static guint32 cum_bytes;
 static const frame_data *ref;
 static frame_data ref_frame;
@@ -213,10 +237,14 @@ static int load_cap_file(capture_file *, char *, int, gboolean, int, gint64);
 static gboolean process_packet(capture_file *cf, epan_dissect_t *edt, gint64 offset,
     struct wtap_pkthdr *whdr, const guchar *pd,
     guint tap_flags);
+static gboolean pass_packet(capture_file *cf, epan_dissect_t *edt, gint64 offset,
+    struct wtap_pkthdr *whdr, const guchar *pd,
+    guint tap_flags);
 static void show_capture_file_io_error(const char *, int, gboolean);
 static void show_print_file_io_error(int err);
 static gboolean write_preamble(capture_file *cf);
 static gboolean print_packet(capture_file *cf, epan_dissect_t *edt);
+static gboolean print_packet2(capture_file *cf, epan_dissect_t *edt, gint64 offset);
 static gboolean write_finale(void);
 static const char *cf_open_error_message(int err, gchar *err_info,
     gboolean for_writing, int file_type);
@@ -236,6 +264,24 @@ struct string_elem {
   const char *sstr;   /* The short string */
   const char *lstr;   /* The long string */
 };
+
+int extra_rules(gchar *optarg, gchar out[][128])
+{
+    int num = 0;
+    char *ptr1 = optarg;
+    char *ptr2;
+    if (ptr1 == NULL)
+            return -1;
+    while ((ptr2 = strchr(ptr1, ';')) != NULL) {
+        *ptr2 = '\0';
+        strcpy(out[num], ptr1);
+        ptr1 = ptr2 + 1;
+        num++;
+    }
+    strcpy(out[num], ptr1);
+    num++;
+    return num;
+}
 
 static gint
 string_compare(gconstpointer a, gconstpointer b)
@@ -337,6 +383,9 @@ print_usage(FILE *output)
   fprintf(output, "Input file:\n");
   fprintf(output, "  -r <infile>              set the filename to read from (- to read from stdin)\n");
 
+  fprintf(output, "  -m tag                   set tag\n");
+  fprintf(output, "  -M index                 set index\n");
+
   fprintf(output, "\n");
   fprintf(output, "Processing:\n");
   fprintf(output, "  -2                       perform a two-pass analysis\n");
@@ -344,6 +393,7 @@ print_usage(FILE *output)
   fprintf(output, "  -Y <display filter>      packet displaY filter in Wireshark display filter\n");
   fprintf(output, "                           syntax\n");
   fprintf(output, "  -n                       disable all name resolutions (def: all enabled)\n");
+  fprintf(output, "  -J                       ======the second rule\n");
   fprintf(output, "  -N <name resolve flags>  enable specific name resolution(s): \"mnNtCd\"\n");
   fprintf(output, "  -d %s ...\n", DECODE_AS_ARG_TEMPLATE);
   fprintf(output, "                           \"Decode As\", see the man page for details\n");
@@ -408,13 +458,13 @@ print_usage(FILE *output)
   fprintf(output, "  -K <keytab>              keytab file to use for kerberos decryption\n");
   fprintf(output, "  -G [report]              dump one of several available reports and exit\n");
   fprintf(output, "                           default report=\"fields\"\n");
-  fprintf(output, "                           use \"-G help\" for more help\n");
+  fprintf(output, "                           use \"-G ?\" for more help\n");
 #ifdef __linux__
   fprintf(output, "\n");
-  fprintf(output, "Dumpcap can benefit from an enabled BPF JIT compiler if available.\n");
-  fprintf(output, "You might want to enable it by executing:\n");
-  fprintf(output, " \"echo 1 > /proc/sys/net/core/bpf_jit_enable\"\n");
-  fprintf(output, "Note that this can make your system less secure!\n");
+  fprintf(output, "WARNING: dumpcap will enable kernel BPF JIT compiler if available.\n");
+  fprintf(output, "You might want to reset it\n");
+  fprintf(output, "By doing \"echo 0 > /proc/sys/net/core/bpf_jit_enable\"\n");
+  fprintf(output, "\n");
 #endif
 
 }
@@ -578,11 +628,11 @@ main(int argc, char *argv[])
   gchar               *volatile cf_name = NULL;
   gchar               *rfilter = NULL;
   gchar               *dfilter = NULL;
+  gchar               *dfilter2 = NULL;
 #ifdef HAVE_PCAP_OPEN_DEAD
   struct bpf_program   fcode;
 #endif
   dfilter_t           *rfcode = NULL;
-  dfilter_t           *dfcode = NULL;
   gchar               *err_msg;
   e_prefs             *prefs_p;
   char                 badopt;
@@ -613,7 +663,7 @@ main(int argc, char *argv[])
  * We do *not* use a leading - because the behavior of a leading - is
  * platform-dependent.
  */
-#define OPTSTRING "+2" OPTSTRING_CAPTURE_COMMON "C:d:e:E:F:gG:hH:j:" "K:lnN:o:O:PqQr:R:S:t:T:u:U:vVw:W:xX:Y:z:"
+#define OPTSTRING "+2" OPTSTRING_CAPTURE_COMMON "C:d:e:E:F:gG:hH:j:" "K:lnN:o:O:PqQr:R:S:t:T:u:U:vVw:W:xX:Y:z:m:M:J:"
 
   static const char    optstring[] = OPTSTRING;
 
@@ -702,6 +752,9 @@ main(int argc, char *argv[])
    * and then process them after initializing libwireshark?
    */
   opterr = 0;
+
+  pid = getpid();
+  sprintf(tmpfile_path, "/tmp/%d.tmp", (int)pid);
 
   while ((opt = getopt_long(argc, argv, optstring, long_options, NULL)) != -1) {
     switch (opt) {
@@ -876,18 +929,12 @@ main(int argc, char *argv[])
         proto_registrar_dump_protocols();
       else if (strcmp(argv[2], "values") == 0)
         proto_registrar_dump_values();
-      else if (strcmp(argv[2], "help") == 0)
-        glossary_option_help();
-      /* These are supported only for backwards compatibility and may or may not work
-       * for a given user in a given directory on a given operating system with a given
-       * command-line interpreter.
-       */
       else if (strcmp(argv[2], "?") == 0)
         glossary_option_help();
       else if (strcmp(argv[2], "-?") == 0)
         glossary_option_help();
       else {
-        cmdarg_err("Invalid \"%s\" option for -G flag, enter -G help for more help.", argv[2]);
+        cmdarg_err("Invalid \"%s\" option for -G flag, enter -G ? for more help.", argv[2]);
         return 1;
       }
     }
@@ -1183,6 +1230,13 @@ main(int argc, char *argv[])
       break;
     case 'r':        /* Read capture file x */
       cf_name = g_strdup(optarg);
+      strcpy(file_name, optarg);
+      break;
+    case 'm':
+      strcpy(tagg, optarg);
+      break;
+    case 'M':
+      strcpy(indexx, optarg);
       break;
     case 'R':        /* Read file filter */
       rfilter = optarg;
@@ -1341,7 +1395,14 @@ main(int argc, char *argv[])
       /* already processed; just ignore it now */
       break;
     case 'Y':
-      dfilter = optarg;
+      //strcpy(tmp_tmp, optarg);
+      rules_num = extra_rules(optarg, rules);
+      dfilter = rules[0];
+      break;
+    case 'J':
+      //strcpy(tmp_tmp, optarg);
+      tags_num = extra_rules(optarg, tags);
+      dfilter2 = optarg;
       break;
     case 'z':
       /* We won't call the init function for the stat this soon
@@ -1769,6 +1830,7 @@ main(int argc, char *argv[])
   }
   cfile.rfcode = rfcode;
 
+  /*
   if (dfilter != NULL) {
     tshark_debug("Compiling display filter: '%s'", dfilter);
     if (!dfilter_compile(dfilter, &dfcode, &err_msg)) {
@@ -1797,6 +1859,26 @@ main(int argc, char *argv[])
     }
   }
   cfile.dfcode = dfcode;
+  */
+
+  if ((rules_num != tags_num) || (rules_num > 10)) {
+    fprintf(stderr, "rules_num != tags_num, or rules_num > 10\n");
+    return 2;
+  }
+  kkk = 0;
+  while(kkk < rules_num) {
+    if (!dfilter_compile(rules[kkk], &dfcodes[kkk], &err_msg)) {
+        cmdarg_err("%s", err_msg); 
+        g_free(err_msg);
+        epan_cleanup();
+        return 2;
+    } else
+        kkk++;
+  }
+  if (rules_num > 0) {
+  	dfcode = dfcodes[0];
+  	cfile.dfcode = dfcode;
+  }
 
   if (print_packet_info) {
     /* If we're printing as text or PostScript, we have
@@ -2286,13 +2368,6 @@ capture(void)
   if (!ret)
     return FALSE;
 
-  /*
-   * Force synchronous resolution of IP addresses; we're doing only
-   * one pass, so we can't do it in the background and fix up past
-   * dissections.
-   */
-  set_resolution_synchrony(TRUE);
-
   /* the actual capture loop
    *
    * XXX - glib doesn't seem to provide any event based loop handling.
@@ -2710,6 +2785,11 @@ process_packet_first_pass(capture_file *cf, epan_dissect_t *edt,
      run a read filter, or display filter, or we're going to process taps, set up to
      do a dissection and do so. */
   if (edt) {
+    if (gbl_resolv_flags.mac_name || gbl_resolv_flags.network_name ||
+        gbl_resolv_flags.transport_name)
+      /* Grab any resolved addresses */
+      host_name_lookup_process();
+
     /* If we're running a read filter, prime the epan_dissect_t with that
        filter. */
     if (cf->rfcode)
@@ -2778,6 +2858,11 @@ process_packet_second_pass(capture_file *cf, epan_dissect_t *edt, frame_data *fd
      run a read filter, or we're going to process taps, set up to
      do a dissection and do so. */
   if (edt) {
+    if (gbl_resolv_flags.mac_name || gbl_resolv_flags.network_name ||
+        gbl_resolv_flags.transport_name)
+      /* Grab any resolved addresses */
+      host_name_lookup_process();
+
     /* If we're running a display filter, prime the epan_dissect_t with that
        filter. */
     if (cf->dfcode)
@@ -3065,12 +3150,6 @@ load_cap_file(capture_file *cf, char *save_file, int out_file_type,
       edt = epan_dissect_new(cf->epan, create_proto_tree, print_packet_info && print_details);
     }
 
-    /*
-     * Force synchronous resolution of IP addresses; in this pass, we
-     * can't do it in the background and fix up past dissections.
-     */
-    set_resolution_synchrony(TRUE);
-
     for (framenum = 1; err == 0 && framenum <= cf->count; framenum++) {
       fdata = frame_data_sequence_find(cf->frames, framenum);
       if (wtap_seek_read(cf->wth, fdata->file_off, &phdr, &buf, &err,
@@ -3187,7 +3266,6 @@ load_cap_file(capture_file *cf, char *save_file, int out_file_type,
         create_proto_tree = TRUE;
       else
         create_proto_tree = FALSE;
-
       tshark_debug("tshark: create_proto_tree = %s", create_proto_tree ? "TRUE" : "FALSE");
 
       /* The protocol tree will be "visible", i.e., printed, only if we're
@@ -3197,38 +3275,57 @@ load_cap_file(capture_file *cf, char *save_file, int out_file_type,
       edt = epan_dissect_new(cf->epan, create_proto_tree, print_packet_info && print_details);
     }
 
-    /*
-     * Force synchronous resolution of IP addresses; we're doing only
-     * one pass, so we can't do it in the background and fix up past
-     * dissections.
-     */
-    set_resolution_synchrony(TRUE);
-
     while (wtap_read(cf->wth, &err, &err_info, &data_offset)) {
       framenum++;
+	  first = 0;
 
       tshark_debug("tshark: processing packet #%d", framenum);
+
+      memset(addtag, 0, sizeof(addtag));
 
       if (process_packet(cf, edt, data_offset, wtap_phdr(cf->wth),
                          wtap_buf_ptr(cf->wth),
                          tap_flags)) {
-        /* Either there's no read filtering or this packet passed the
-           filter, so, if we're writing to a capture file, write
-           this packet out. */
-        if (pdh != NULL) {
-          tshark_debug("tshark: writing packet #%d to outfile", framenum);
-          if (!wtap_dump(pdh, wtap_phdr(cf->wth), wtap_buf_ptr(cf->wth), &err, &err_info)) {
-            /* Error writing to a capture file */
-            tshark_debug("tshark: error writing to a capture file (%d)", err);
-            switch (err) {
+		  ppp = 0;
+		  while (ppp < rules_num) {
+			  cf->dfcode = dfcodes[ppp];
+			  if (pass_packet(cf, edt, data_offset, wtap_phdr(cf->wth),
+						  wtap_buf_ptr(cf->wth),
+						  tap_flags)) {
+				  if (first != 0) {
+					  strcat(addtag, ",");
+				  }
+				  first++;
+				  strcat(addtag, tags[ppp]);
+			  }
+			  ppp++;
+		  }
+		  if (first == 0) {
+			  strcat(addtag, " ");
+			  cf->dfcode = NULL;
+		  } 
 
-            case WTAP_ERR_UNWRITABLE_ENCAP:
-              /*
-               * This is a problem with the particular frame we're writing
-               * and the file type and subtype we're writing; note that,
-               * and report the frame number and file type/subtype.
-               */
-              fprintf(stderr,
+		  fprintf(stdout, ",\"tag\": \"");
+		  fprintf(stdout, addtag);
+		  fprintf(stdout, "\"");
+		  fprintf(stdout, "}\n\n");
+		  /* Either there's no read filtering or this packet passed the
+			 filter, so, if we're writing to a capture file, write
+			 this packet out. */
+		  if (pdh != NULL) {
+			  tshark_debug("tshark: writing packet #%d to outfile", framenum);
+			  if (!wtap_dump(pdh, wtap_phdr(cf->wth), wtap_buf_ptr(cf->wth), &err, &err_info)) {
+				  /* Error writing to a capture file */
+				  tshark_debug("tshark: error writing to a capture file (%d)", err);
+				  switch (err) {
+
+					  case WTAP_ERR_UNWRITABLE_ENCAP:
+						  /*
+						   * This is a problem with the particular frame we're writing
+						   * and the file type and subtype we're writing; note that,
+						   * and report the frame number and file type/subtype.
+						   */
+						  fprintf(stderr,
                       "Frame %u of \"%s\" has a network type that can't be saved in a \"%s\" file.\n",
                       framenum, cf->filename,
                       wtap_file_type_subtype_short_string(out_file_type));
@@ -3280,7 +3377,9 @@ load_cap_file(capture_file *cf, char *save_file, int out_file_type,
             wtap_block_array_free(shb_hdrs);
             wtap_block_array_free(nrb_hdrs);
             exit(2);
-          }
+          } else {
+		  	fprintf(stdout, "\"}\n\n\n");
+		  }
         }
       }
       /* Stop reading if we have the maximum number of packets;
@@ -3295,6 +3394,8 @@ load_cap_file(capture_file *cf, char *save_file, int out_file_type,
         break;
       }
     }
+
+    remove(tmpfile_path);
 
     if (edt) {
       epan_dissect_free(edt);
@@ -3422,6 +3523,11 @@ process_packet(capture_file *cf, epan_dissect_t *edt, gint64 offset, struct wtap
      run a read filter, or we're going to process taps, set up to
      do a dissection and do so. */
   if (edt) {
+    if (print_packet_info && (gbl_resolv_flags.mac_name || gbl_resolv_flags.network_name ||
+        gbl_resolv_flags.transport_name))
+      /* Grab any resolved addresses */
+      host_name_lookup_process();
+
     /* If we're running a filter, prime the epan_dissect_t with that
        filter. */
     if (cf->dfcode)
@@ -3451,8 +3557,8 @@ process_packet(capture_file *cf, epan_dissect_t *edt, gint64 offset, struct wtap
     epan_dissect_run_with_taps(edt, cf->cd_t, whdr, frame_tvbuff_new(&fdata, pd), &fdata, cinfo);
 
     /* Run the filter if we have it. */
-    if (cf->dfcode)
-      passed = dfilter_apply_edt(cf->dfcode, edt);
+    //if (cf->dfcode)
+     // passed = dfilter_apply_edt(cf->dfcode, edt);
   }
 
   if (passed) {
@@ -3462,7 +3568,7 @@ process_packet(capture_file *cf, epan_dissect_t *edt, gint64 offset, struct wtap
     if (print_packet_info) {
       /* We're printing packet information; print the information for
          this packet. */
-      print_packet(cf, edt);
+      print_packet2(cf, edt, offset);
 
       /* The ANSI C standard does not appear to *require* that a line-buffered
          stream be flushed to the host environment whenever a newline is
@@ -3500,6 +3606,54 @@ process_packet(capture_file *cf, epan_dissect_t *edt, gint64 offset, struct wtap
 
   prev_cap_frame = fdata;
   prev_cap = &prev_cap_frame;
+
+  if (edt) {
+    epan_dissect_reset(edt);
+    frame_data_destroy(&fdata);
+  }
+  return passed;
+}
+
+static gboolean
+pass_packet(capture_file *cf, epan_dissect_t *edt, gint64 offset, struct wtap_pkthdr *whdr,
+               const guchar *pd, guint tap_flags)
+{
+  frame_data      fdata;
+  column_info    *cinfo;
+  gboolean        passed;
+
+  /* If we're not running a display filter and we're not printing any
+     packet information, we don't need to do a dissection. This means
+     that all packets can be marked as 'passed'. */
+  passed = TRUE;
+
+  frame_data_init(&fdata, cf->count, whdr, offset, cum_bytes);
+
+  /* If we're going to print packet information, or we're going to
+     run a read filter, or we're going to process taps, set up to
+     do a dissection and do so. */
+  if (edt) {
+    if (print_packet_info && (gbl_resolv_flags.mac_name || gbl_resolv_flags.network_name ||
+        gbl_resolv_flags.transport_name))
+      host_name_lookup_process();
+
+    if (cf->dfcode)
+      epan_dissect_prime_dfilter(edt, cf->dfcode);
+
+    col_custom_prime_edt(edt, &cf->cinfo);
+
+    if ((tap_flags & TL_REQUIRES_COLUMNS) || (print_packet_info && print_summary) || output_fields_has_cols(output_fields))
+      cinfo = &cf->cinfo;
+    else
+      cinfo = NULL;
+
+   epan_dissect_run_with_taps(edt, cf->cd_t, whdr, frame_tvbuff_new(&fdata, pd), &fdata, cinfo);
+   cf->cd_t      = wtap_file_type_subtype(cf->wth);
+
+    /* Run the filter if we have it. */
+    if (cf->dfcode)
+      passed = dfilter_apply_edt(cf->dfcode, edt);
+  }
 
   if (edt) {
     epan_dissect_reset(edt);
@@ -3886,6 +4040,271 @@ print_packet(capture_file *cf, epan_dissect_t *edt)
       print_args.print_hex = print_hex;
       write_ek_proto_tree(output_fields, &print_args, protocolfilter, edt, stdout);
       printf("\n");
+      return !ferror(stdout);
+    }
+  }
+  if (print_hex) {
+    if (print_summary || print_details) {
+      if (!print_line(print_stream, 0, ""))
+        return FALSE;
+    }
+    if (!print_hex_data(print_stream, edt))
+      return FALSE;
+    if (!print_line(print_stream, 0, separator))
+      return FALSE;
+  }
+  return TRUE;
+}
+
+static int format_ek(char *readstr, char *formatstr)
+{
+   char *lbrace1, *lbrace2, *rbrace, *comma, *old_comma;
+   char *read_begin;
+   char *format_begin = formatstr;
+   int len, addd = 0;
+   if(readstr == NULL || formatstr == NULL)
+     return -1;
+
+   read_begin = strchr(readstr, '}');
+   while ((lbrace1 = strchr(read_begin, '{'))) {
+     lbrace2 = strchr(lbrace1+1, '{');
+     rbrace  = strchr(lbrace1+1, '}');
+     comma   = strchr(lbrace1+1, ',');
+     if (rbrace == NULL)
+         break;
+     if (lbrace2 != NULL) {
+       if (rbrace < lbrace2) {
+         len = rbrace-lbrace1-1;
+         if (addd != 0) {
+             *format_begin = ',';
+             format_begin++;
+         } else
+             addd = 1;
+         strncpy(format_begin, lbrace1+1, len);
+         format_begin += len;
+         read_begin = lbrace2;
+       } else if ((comma == NULL) || (comma > lbrace2)) {
+         read_begin = lbrace2;
+       } else { //{..,..{..}
+         old_comma = comma;//supress warning
+         while ((comma != NULL) && (comma < lbrace2)) {
+           old_comma = comma;
+           comma = strchr(old_comma+1, ',');
+         }
+         len = old_comma-lbrace1-1;
+         if (addd != 0) {
+             *format_begin = ',';
+             format_begin++;
+         } else
+             addd = 1;
+         strncpy(format_begin, lbrace1+1, len);
+         format_begin +=len;
+         read_begin = lbrace2;
+       }
+     } else {//{....}
+       len = rbrace - lbrace1 - 1;
+       if (addd != 0) {
+           *format_begin = ',';
+           format_begin++;
+       } else
+           addd = 1;
+       strncpy(format_begin, lbrace1+1, len);
+       format_begin += len;
+       read_begin =rbrace;
+     }
+   }
+
+   return 0;
+}
+
+static void duplicate_del(char *tmp_buf)
+{
+       char *index = NULL, *index_a = NULL, *index_b = NULL, *tmp = NULL;
+       /*Duplicate ip_ip_addr Error*/
+       index = strstr(tmp_buf, "ip_ip_addr");
+       if (index) {
+           index_a = index;
+           tmp = index + 1;
+           index = strstr(tmp, "ip_ip_addr");
+           if (index)
+           index_b = index;
+       }
+       if ((index_a != NULL) && (index_b != NULL)) {
+           *(index_a+9) = 's';
+           *(index_b+9) = 'd';
+       }
+ 
+       /*Duplicate ip_ip_host Error*/
+       index   = NULL;
+       tmp     = NULL;
+       index_a = NULL;
+       index_b = NULL;
+       index = strstr(tmp_buf, "ip_ip_host");
+       if (index) {
+           index_a = index;
+           tmp = index + 1;
+           index = strstr(tmp, "ip_ip_host");
+           if (index)
+           index_b = index;
+       }
+       if ((index_a != NULL) && (index_b != NULL)) {
+           *(index_a+9) = 's';
+           *(index_b+9) = 'd';
+       }
+       /*Duplicate tcp_tcp_port Error*/
+       index   = NULL;
+       tmp     = NULL;
+       index_a = NULL;
+       index_b = NULL;
+       index = strstr(tmp_buf, "tcp_tcp_port");
+       if (index) {
+           index_a = index;
+           tmp = index + 1;
+           index = strstr(tmp, "tcp_tcp_port");
+           if (index)
+           index_b = index;
+       }
+       if ((index_a != NULL) && (index_b != NULL)) {
+           *(index_a+9) = 's';
+           *(index_b+9) = 'd';
+       }
+
+       /*Duplicate udp_udp_port Error*/
+       index   = NULL;
+       tmp     = NULL;
+       index_a = NULL;
+       index_b = NULL;
+       index = strstr(tmp_buf, "udp_udp_port");
+       if (index) {
+           index_a = index;
+           tmp = index + 1;
+           index = strstr(tmp, "udp_udp_port");
+           if (index)
+           index_b = index;
+       }
+       if ((index_a != NULL) && (index_b != NULL)) {
+           *(index_a+9) = 's';
+           *(index_b+9) = 'd';
+       }
+ 
+       return;
+}
+
+static gboolean
+print_packet2(capture_file *cf, epan_dissect_t *edt, gint64 offset)
+{
+  print_args_t print_args;
+  int ret;
+  char tmp_tmp[16] = "";
+
+  if (print_summary || output_fields_has_cols(output_fields)) {
+    /* Just fill in the columns. */
+    epan_dissect_fill_in_columns(edt, FALSE, TRUE);
+
+    if (print_summary) {
+      /* Now print them. */
+      switch (output_action) {
+
+      case WRITE_TEXT:
+        if (!print_columns(cf))
+          return FALSE;
+        break;
+
+      case WRITE_XML:
+        write_psml_columns(edt, stdout);
+        return !ferror(stdout);
+      case WRITE_FIELDS: /*No non-verbose "fields" format */
+      case WRITE_JSON:
+      case WRITE_EK:
+        g_assert_not_reached();
+        break;
+      }
+    }
+  }
+  if (print_details) {
+    /* Print the information in the protocol tree. */
+    switch (output_action) {
+
+    case WRITE_TEXT:
+      /* Only initialize the fields that are actually used in proto_tree_print.
+       * This is particularly important for .range, as that's heap memory which
+       * we would otherwise have to g_free().
+      print_args.to_file = TRUE;
+      print_args.format = print_format;
+      print_args.print_summary = print_summary;
+      print_args.print_formfeed = FALSE;
+      packet_range_init(&print_args.range, &cfile);
+      */
+      print_args.print_hex = print_hex;
+      print_args.print_dissections = print_details ? print_dissections_expanded : print_dissections_none;
+
+      if (!proto_tree_print(&print_args, edt, output_only_tables, print_stream))
+        return FALSE;
+      if (!print_hex) {
+        if (!print_line(print_stream, 0, separator))
+          return FALSE;
+      }
+      break;
+
+    case WRITE_XML:
+      write_pdml_proto_tree(output_fields, protocolfilter, edt, stdout);
+      printf("\n");
+      return !ferror(stdout);
+    case WRITE_FIELDS:
+      write_fields_proto_tree(output_fields, edt, &cf->cinfo, stdout);
+      printf("\n");
+      return !ferror(stdout);
+    case WRITE_JSON:
+      print_args.print_hex = print_hex;
+      write_json_proto_tree(output_fields, &print_args, protocolfilter, edt, stdout);
+      printf("\n");
+      return !ferror(stdout);
+    case WRITE_EK:
+      print_args.print_hex = print_hex;
+
+      char aaa[256] = "";
+      sprintf(aaa, "{\"index\" : {\"_index\": \"%s\", \"_type\": \"pcap_file\", \"_score\": null}}", indexx);
+      tmp_file = fopen(tmpfile_path, "w+");
+      if (tmp_file == NULL) {
+        fprintf(stdout, "======open tmp file error\n");
+        return FALSE;
+      }
+
+      memset(read_str, 0, sizeof(read_str));
+      memset(format_str, 0, sizeof(format_str));
+      write_ek_proto_tree(output_fields, &print_args, protocolfilter, edt, tmp_file);
+      fseek(tmp_file, 0, SEEK_SET);
+      ret = fread(read_str, 1, 4095, tmp_file);
+      fclose(tmp_file);
+      if ((ret > 0) && (ret < 4096))
+        read_str[ret] = '\0';
+
+      format_ek(read_str, format_str);
+
+      strcat(format_str, ",\"filename\": \"");
+      strcat(format_str, file_name);
+      strcat(format_str, "\"");
+
+
+      strcat(format_str, ",\"index\": \"");
+      strcat(format_str, indexx);
+      strcat(format_str, "\"");
+
+      strcat(format_str, ",\"offset\": \"");
+      sprintf(tmp_tmp, "%ld", offset);
+      strcat(format_str, tmp_tmp);
+      strcat(format_str, "\"");
+
+      duplicate_del(format_str);
+
+	  fprintf(stdout, "%s\n", aaa);
+	  fprintf(stdout, "{");
+      fprintf(stdout, "%s", format_str);
+	  if (print_stream == NULL){
+		  print_stream = print_stream_text_stdio_new(stdout);
+	  }
+      print_base64_data(print_stream, edt);
+
       return !ferror(stdout);
     }
   }

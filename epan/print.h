@@ -110,6 +110,7 @@ WS_DLL_PUBLIC gboolean proto_tree_print(print_args_t *print_args,
                                         GHashTable *output_only_tables,
                                         print_stream_t *stream);
 WS_DLL_PUBLIC gboolean print_hex_data(print_stream_t *stream, epan_dissect_t *edt);
+WS_DLL_PUBLIC gboolean print_base64_data(print_stream_t *stream, epan_dissect_t *edt);
 
 WS_DLL_PUBLIC void write_pdml_preamble(FILE *fh, const gchar* filename);
 WS_DLL_PUBLIC void write_pdml_proto_tree(output_fields_t* fields, gchar **protocolfilter, epan_dissect_t *edt, FILE *fh);

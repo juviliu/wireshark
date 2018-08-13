@@ -221,8 +221,8 @@ epan_get_frame_ts(const epan_t *session, guint32 frame_num)
 	if (session->get_frame_ts)
 		abs_ts = session->get_frame_ts(session->data, frame_num);
 
-	if (!abs_ts)
-		g_warning("!!! couldn't get frame ts for %u !!!\n", frame_num);
+	//if (!abs_ts)
+		//g_warning("!!! couldn't get frame ts for %u !!!\n", frame_num);
 
 	return abs_ts;
 }

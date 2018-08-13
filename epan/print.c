@@ -43,6 +43,7 @@
 
 #define PDML_VERSION "0"
 #define PSML_VERSION "0"
+unsigned char b64_chr[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 typedef struct {
     int                  level;
@@ -215,11 +216,6 @@ proto_tree_print_node(proto_node *node, gpointer data)
         pd = get_field_data(pdata->src_list, fi);
         if (pd) {
             if (!print_line(pdata->stream, 0, "")) {
-                pdata->success = FALSE;
-                return;
-            }
-            if (!print_hex_data_buffer(pdata->stream, pd,
-                                       fi->length, pdata->encoding)) {
                 pdata->success = FALSE;
                 return;
             }
@@ -1589,6 +1585,38 @@ json_write_field_hex_value(write_json_data *pdata, field_info *fi)
     }
 }
 
+unsigned int b64_encode(const unsigned int* in, unsigned int in_len, unsigned char* out) {
+
+    unsigned int i=0, j=0, k=0, s[3];
+
+    for (i=0;i<in_len;i++) {
+        s[j++]=*(in+i);
+        if (j==3) {
+           out[k+0] = b64_chr[ (s[0]&255)>>2 ];
+           out[k+1] = b64_chr[ ((s[0]&0x03)<<4)+((s[1]&0xF0)>>4) ];
+           out[k+2] = b64_chr[ ((s[1]&0x0F)<<2)+((s[2]&0xC0)>>6) ];
+           out[k+3] = b64_chr[ s[2]&0x3F ];
+           j=0; k+=4;
+        }
+    }
+
+    if (j) {
+        if (j==1)
+            s[1] = 0;
+        out[k+0] = b64_chr[ (s[0]&255)>>2 ];
+        out[k+1] = b64_chr[ ((s[0]&0x03)<<4)+((s[1]&0xF0)>>4) ];
+        if (j==2)
+            out[k+2] = b64_chr[ ((s[1]&0x0F)<<2) ];
+        else
+            out[k+2] = '=';
+        out[k+3] = '=';
+        k+=4;
+    }
+
+    out[k] = '\0';
+
+    return k;
+}
 gboolean
 print_hex_data(print_stream_t *stream, epan_dissect_t *edt)
 {
@@ -1630,6 +1658,57 @@ print_hex_data(print_stream_t *stream, epan_dissect_t *edt)
     return TRUE;
 }
 
+gboolean
+print_base64_data(print_stream_t *stream, epan_dissect_t *edt)
+{
+    gboolean      multiple_sources;
+    GSList       *src_le;
+    tvbuff_t     *tvb;
+    char         *line, *name;
+    const guchar *cp;
+    guint         length;
+    struct data_source *src;
+
+    multiple_sources = (edt->pi.data_src->next != NULL);
+
+		char *prev=",\"rawdata\":\"";
+		size_t nwritten;
+        nwritten = fwrite(prev, 1, strlen(prev), stdout);
+    for (src_le = edt->pi.data_src; src_le != NULL;
+         src_le = src_le->next) {
+        src = (struct data_source *)src_le->data;
+        tvb = get_data_source_tvb(src);
+        if (multiple_sources) {
+            name = get_data_source_name(src);
+            line = g_strdup_printf("%s:", name);
+            wmem_free(NULL, name);
+            //print_line(stream, 0, line);
+            g_free(line);
+        }
+        length = tvb_captured_length(tvb);
+        if (length == 0)
+		{
+			char *end = "\"";
+			nwritten = fwrite(end, 1, strlen(end), stdout);
+			return TRUE;
+		}
+        cp = tvb_get_ptr(tvb, 0, length);
+
+		unsigned int *in = malloc(length*sizeof(unsigned int));
+		unsigned int *out = malloc(2*length*sizeof(unsigned int));
+		for (unsigned int i = 0; i < length; i++) {
+			in[i] = (unsigned int)cp[i];
+		}
+		unsigned int out_size = b64_encode(in, length, out);
+        nwritten = fwrite(out, 1, out_size, stdout);
+		free(in);
+		free(out);
+
+	}
+		char *end = "\"";
+        nwritten = fwrite(end, 1, strlen(end), stdout);
+	return TRUE;
+}  
 /*
  * This routine is based on a routine created by Dan Lasley
  * <DLASLEY@PROMUS.com>.
@@ -1982,7 +2061,7 @@ void write_fields_preamble(output_fields_t* fields, FILE *fh)
     fputc('\n', fh);
 }
 
-static void format_field_values(output_fields_t* fields, gpointer field_index, gchar* value)
+static void format_field_values(output_fields_t* fields, gpointer field_index, const gchar* value)
 {
     guint      indx;
     GPtrArray* fv_p;
@@ -2005,36 +2084,17 @@ static void format_field_values(output_fields_t* fields, gpointer field_index, g
     switch (fields->occurrence) {
     case 'f':
         /* print the value of only the first occurrence of the field */
-        if (g_ptr_array_len(fv_p) != 0) {
-            /*
-             * This isn't the first occurrence, so the value won't be used;
-             * free it.
-             */
-            g_free(value);
+        if (g_ptr_array_len(fv_p) != 0)
             return;
-        }
         break;
     case 'l':
         /* print the value of only the last occurrence of the field */
-        if (g_ptr_array_len(fv_p) != 0) {
-            /*
-             * This isn't the first occurrence, so there's already a
-             * value in the array, which won't be used; free the
-             * first (only) element in the array, and then remove
-             * it - this value will replace it.
-             */
-            g_free(g_ptr_array_index(fv_p, 0));
-            g_ptr_array_set_size(fv_p, 0);
-        }
+        g_ptr_array_set_size(fv_p, 0);
         break;
     case 'a':
         /* print the value of all accurrences of the field */
-        if (g_ptr_array_len(fv_p) != 0) {
-            /*
-             * This isn't the first occurrence. so add the "aggregator"
-             * character as a separator between the previous element
-             * and this element.
-             */
+        /* If not the first, add the 'aggregator' */
+        if (g_ptr_array_len(fv_p) > 0) {
             g_ptr_array_add(fv_p, (gpointer)g_strdup_printf("%c", fields->aggregator));
         }
         break;

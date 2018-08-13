@@ -70,6 +70,7 @@ static int hf_frame_marked = -1;
 static int hf_frame_ignored = -1;
 static int hf_link_number = -1;
 static int hf_frame_protocols = -1;
+static int hf_frame_protocol = -1;
 static int hf_frame_color_filter_name = -1;
 static int hf_frame_color_filter_text = -1;
 static int hf_frame_interface_id = -1;
@@ -194,18 +195,6 @@ dissect_frame(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent_tree, void* 
 
 	case REC_TYPE_PACKET:
 		pinfo->current_proto = "Frame";
-		if (pinfo->phdr->presence_flags & WTAP_HAS_PACK_FLAGS) {
-			if (pinfo->phdr->pack_flags & 0x00000001)
-				pinfo->p2p_dir = P2P_DIR_RECV;
-			if (pinfo->phdr->pack_flags & 0x00000002)
-				pinfo->p2p_dir = P2P_DIR_SENT;
-		}
-
-		/*
-		 * If the pseudo-header *and* the packet record both
-		 * have direction information, the pseudo-header
-		 * overrides the packet record.
-		 */
 		if (pinfo->pseudo_header != NULL) {
 			switch (pinfo->pkt_encap) {
 
@@ -338,10 +327,14 @@ dissect_frame(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent_tree, void* 
 			    pinfo->phdr->interface_id);
 		}
 		if (pinfo->phdr->presence_flags & WTAP_HAS_PACK_FLAGS) {
-			if (pinfo->phdr->pack_flags & 0x00000001)
+			if (pinfo->phdr->pack_flags & 0x00000001) {
 				proto_item_append_text(ti, " (inbound)");
-			if (pinfo->phdr->pack_flags & 0x00000002)
+				pinfo->p2p_dir = P2P_DIR_RECV;
+			}
+			if (pinfo->phdr->pack_flags & 0x00000002) {
 				proto_item_append_text(ti, " (outbound)");
+				pinfo->p2p_dir = P2P_DIR_SENT;
+			}
 		}
 
 		fh_tree = proto_item_add_subtree(ti, ett_frame);
@@ -589,12 +582,22 @@ dissect_frame(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent_tree, void* 
 			wmem_strbuf_append(val, proto_get_protocol_filter_name(GPOINTER_TO_UINT(wmem_list_frame_data(frame))));
 			frame = wmem_list_frame_next(frame);
 		}
+		const gchar * package_proto =NULL;
 		while (frame) {
 			wmem_strbuf_append_c(val, ':');
-			wmem_strbuf_append(val, proto_get_protocol_filter_name(GPOINTER_TO_UINT(wmem_list_frame_data(frame))));
+			const gchar *str = proto_get_protocol_filter_name(GPOINTER_TO_UINT(wmem_list_frame_data(frame)));
+			wmem_strbuf_append(val, str);
+			if (strcmp("data",str) != 0){
+				package_proto =  str; 
+			}
 			frame = wmem_list_frame_next(frame);
 		}
+		//add package_proto
+
 		ti = proto_tree_add_string(fh_tree, hf_frame_protocols, tvb, 0, 0, wmem_strbuf_get_str(val));
+		wmem_strbuf_t *nval = wmem_strbuf_sized_new(wmem_packet_scope(), 128, 0);
+		wmem_strbuf_append(nval, package_proto);
+		ti = proto_tree_add_string(fh_tree, hf_frame_protocol, tvb, 0, 0, wmem_strbuf_get_str(nval));
 		PROTO_ITEM_SET_GENERATED(ti);
 	}
 
@@ -790,6 +793,11 @@ proto_register_frame(void)
 		  { "Protocols in frame", "frame.protocols",
 		    FT_STRING, BASE_NONE, NULL, 0x0,
 		    "Protocols carried by this frame", HFILL }},
+
+		{ &hf_frame_protocol,
+		  { "Protocol of last frame", "last.protocol",
+		    FT_STRING, BASE_NONE, NULL, 0x0,
+		    "last Protocol carried by this frame", HFILL }},
 
 		{ &hf_frame_color_filter_name,
 		  { "Coloring Rule Name", "frame.coloring_rule.name",

@@ -151,6 +151,8 @@ static int first = 0;
 
 gchar tags[10][128];
 gchar rules[10][128];
+int start_frame=0;
+int gap=10000;
 static int rules_num;
 static int tags_num;
 int kkk = 0;
@@ -282,7 +284,11 @@ int extra_rules(gchar *optarg, gchar out[][128])
     num++;
     return num;
 }
-
+int split_numbers(gchar *optarg)
+{
+	sscanf(optarg,"%d;%d", &start_frame, &gap);
+	return 0;
+}
 static gint
 string_compare(gconstpointer a, gconstpointer b)
 {
@@ -663,7 +669,7 @@ main(int argc, char *argv[])
  * We do *not* use a leading - because the behavior of a leading - is
  * platform-dependent.
  */
-#define OPTSTRING "+2" OPTSTRING_CAPTURE_COMMON "C:d:e:E:F:gG:hH:j:" "K:lnN:o:O:PqQr:R:S:t:T:u:U:vVw:W:xX:Y:z:m:M:J:"
+#define OPTSTRING "+2" OPTSTRING_CAPTURE_COMMON "C:d:e:E:F:gG:hH:j:" "K:lnN:o:O:PqQr:R:S:t:T:u:U:vVw:W:xX:Y:z:m:M:J:Z:"
 
   static const char    optstring[] = OPTSTRING;
 
@@ -1398,6 +1404,9 @@ main(int argc, char *argv[])
       //strcpy(tmp_tmp, optarg);
       rules_num = extra_rules(optarg, rules);
       dfilter = rules[0];
+      break;
+    case 'Z':
+      split_numbers(optarg);
       break;
     case 'J':
       //strcpy(tmp_tmp, optarg);
@@ -3277,6 +3286,12 @@ load_cap_file(capture_file *cf, char *save_file, int out_file_type,
 
     while (wtap_read(cf->wth, &err, &err_info, &data_offset)) {
       framenum++;
+	  if ( framenum < start_frame){
+		  continue;
+	  }
+	  if (gap+start_frame <framenum){
+		  break;
+		}
 	  first = 0;
 
       tshark_debug("tshark: processing packet #%d", framenum);
